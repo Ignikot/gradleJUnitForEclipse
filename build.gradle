@@ -1,0 +1,137 @@
+import groovy.io.FileType
+import java.nio.file.*
+
+apply plugin: 'java'
+
+def List scanSources() {
+    
+    def projects = []
+    (new File(scanRootPath)).eachFileRecurse(FileType.FILES) { file ->
+        if (".project".equalsIgnoreCase(file.getName())) {
+            def dep = []
+            def src = []
+            def parentFile = file.getParentFile()
+            def projectXml = (new XmlSlurper()).parse(file)
+            projectXml.projects.project.each() { prj ->
+                dep.add(prj.text())
+            }
+
+            def classpathFile = new File(parentFile.getPath() + "/.classpath")
+            if(classpathFile.exists()) {
+                def classpath = (new XmlSlurper()).parse(classpathFile)
+                classpath.classpathentry.each() { entry ->
+                    def srcpath = '' + entry.@path
+                    if('src'.equalsIgnoreCase('' + entry.@kind) && !'gen/src'.equalsIgnoreCase(srcpath)) {
+                        src.add('' + entry.@path)
+                    }
+                }
+            }
+            
+            def Expando project = new Expando()
+            project.name = parentFile.getName()
+            project.dir = parentFile.getPath()
+            project.dep = dep
+            project.src = src
+            
+            projects.add(project)
+        }
+    }
+    return projects
+}
+
+def List getAllDependencies(List projects, String projectName) {
+    def Set result = new HashSet()
+    Closure filter = {
+        it != null && projectName.endsWith(it['name'])
+    }
+    def prj = projects.find(filter)
+    if(prj == null) {
+        logger.error("Can't find project with name:" + projectName)
+        return [].asList()
+    }
+    result.add(prj.dir.getPath())
+    prj.dep.each() {
+        result.addAll(getAllDependencies(projects, it))
+    }
+    prj.src.each() {
+        if(it.size() > 0) {
+            result.addAll(getAllDependencies(projects, it))
+        }
+    }
+    return result.asList()
+}
+
+
+def List getAllSources(List projects, String projectName) {
+    def Set result = new HashSet()
+    Closure filter = {
+        it != null && projectName.endsWith(it['name'])
+    }
+    def prj = projects.find(filter)
+    def path = prj.dir
+    prj.src.each() {
+        if (it.startsWith('/')) {
+            result.addAll(getAllSources(projects, it))
+        } else {
+            result.add(path + '/' + it)
+        }
+    }
+    prj.dep.each() {
+        result.addAll(getAllSources(projects, it))
+    }
+    return result.asList()
+}
+
+def projects = scanSources()
+def testProjects = []
+projects.each() { pr ->
+    if(pr.name.startsWith('_')) {
+        testProjects.add(pr.name)
+    }
+}
+
+repositories {
+    jcenter()
+}
+
+dependencies {
+    compile fileTree(dir: wpsPluginsLibPath, include: '*.jar')
+    compile fileTree(dir: wpsRuntimeLibPath, include: '*.jar')
+    compile fileTree(dir: thirdpartyLibPath, include: '*.jar')
+    compile 'junit:junit:4.12'
+}
+
+defaultTasks 'clean'
+
+testProjects.each() { projectName ->
+    configurations {
+        create("${projectName}Compile").extendsFrom(testCompile)
+        create("${projectName}Runtime").extendsFrom(testRuntime)
+    }
+    sourceSets.create(projectName) {
+            java {
+                srcDirs = files(getAllSources(projects, projectName))
+            }
+    }
+
+    task ("testTaskFor${projectName}", type: Test) {
+        testClassesDir = sourceSets."${projectName}".output.classesDir
+        classpath = sourceSets."${projectName}".runtimeClasspath
+        outputs.upToDateWhen { false }
+        ignoreFailures = true
+    }    
+    defaultTasks += "testTaskFor${projectName}".toString()
+}
+
+/*
+tasks.withType(Test) {
+    reports.html.destination = file("${reporting.baseDir}/${name}")
+}
+*/
+
+task testReport(type: TestReport) {
+    destinationDir = file("${reporting.baseDir}/allTests")
+    //testResultDirs = 
+}
+
+defaultTasks += 'testReport'
